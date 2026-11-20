@@ -1,0 +1,497 @@
+From 5eacacc75a493d7418d3aaa4714bd165f101ab93 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 20 Nov 2026 11:19:42 +0000
+Subject: [PATCH] Import 'Maxi (sample entry) (no OI)' sheet as draft POS
+ entries with draft journals
+
+---
+ app/Http/Controllers/PosEntryController.php   |  8 ++-
+ app/Http/Requests/StorePosEntryRequest.php    |  4 +-
+ app/Imports/PosEntryImport.php                | 35 ++++++++++-
+ app/Models/PosEntry.php                       |  6 +-
+ app/Services/PosPostingService.php            |  2 +-
+ app/Services/PosSalesCalculationService.php   | 62 +++++++++++++++++++
+ app/Services/PosWorkbookService.php           | 50 +++++++++++++++
+ config/accounting.php                         |  3 +
+ ..._add_ar_employee_amount_to_pos_entries.php | 22 +++++++
+ .../components/pos/pos-workbook-preview.tsx   |  6 +-
+ .../Unit/PosNoOtherIncomeCalculationTest.php  | 49 +++++++++++++++
+ 11 files changed, 233 insertions(+), 14 deletions(-)
+ create mode 100644 database/migrations/2026_11_20_000001_add_ar_employee_amount_to_pos_entries.php
+ create mode 100644 tests/Unit/PosNoOtherIncomeCalculationTest.php
+
+diff --git a/app/Http/Controllers/PosEntryController.php b/app/Http/Controllers/PosEntryController.php
+index 82f142e..6073fc0 100644
+--- a/app/Http/Controllers/PosEntryController.php
++++ b/app/Http/Controllers/PosEntryController.php
+@@ -161,7 +161,7 @@ public function store(StorePosEntryRequest $request): RedirectResponse
+                 'status' => 'draft',
+                 'created_by' => $request->user()?->id,
+             ]);
+-            if (in_array($pos->calculation_version, ['sales_format_3', 'sales_format_4'], true)) {
++            if (in_array($pos->calculation_version, ['sales_format_3', 'sales_format_4', 'sales_format_5'], true)) {
+                 app(JournalEntryService::class)->savePosDraft($pos, $request->user());
+             }
+ 
+@@ -351,7 +351,7 @@ public function update(UpdatePosEntryRequest $request, PosEntry $posEntry): Redi
+ 
+         DB::transaction(function () use ($posEntry, $request) {
+             $posEntry->fill(collect($request->validated())->except('post_now')->all())->save();
+-            if (in_array($posEntry->calculation_version, ['sales_format_3', 'sales_format_4'], true)) {
++            if (in_array($posEntry->calculation_version, ['sales_format_3', 'sales_format_4', 'sales_format_5'], true)) {
+                 app(JournalEntryService::class)->savePosDraft($posEntry, $request->user());
+             }
+         });
+@@ -432,7 +432,9 @@ public function import(Request $request): RedirectResponse
+             $file = $request->file('file');
+             $names = IOFactory::createReaderForFile($file->getRealPath())->listWorksheetNames($file->getRealPath());
+             $branch = $company->branches()->findOrFail($data['branch_id']);
+-            $sheet = collect($names)->first(fn (string $name): bool => strcasecmp($name, $branch->code.' (Final)') === 0)
++            // Interim: Accounting wants the "no Other Income" sample sheet used for now.
++            $sheet = collect($names)->first(fn (string $name): bool => strcasecmp($name, $branch->code.' (sample entry) (no OI)') === 0)
++                ?? collect($names)->first(fn (string $name): bool => strcasecmp($name, $branch->code.' (Final)') === 0)
+                 ?? collect($names)->first(fn (string $name): bool => strcasecmp($name, 'Maxi (Final)') === 0 && strcasecmp($branch->code, 'MAXI') === 0)
+                 ?? collect($names)->first(fn (string $name): bool => strcasecmp($name, $branch->code) === 0);
+             if ($sheet === null && count($names) === 1) {
+diff --git a/app/Http/Requests/StorePosEntryRequest.php b/app/Http/Requests/StorePosEntryRequest.php
+index 808b876..859e7a9 100644
+--- a/app/Http/Requests/StorePosEntryRequest.php
++++ b/app/Http/Requests/StorePosEntryRequest.php
+@@ -59,7 +59,7 @@ public function rules(): array
+                     : 'nullable',
+                 'numeric', 'min:0', 'max:100',
+             ],
+-            'calculation_version' => ['nullable', Rule::in(['sales_format_2', 'sales_format_3', 'sales_format_4'])],
++            'calculation_version' => ['nullable', Rule::in(['sales_format_2', 'sales_format_3', 'sales_format_4', 'sales_format_5'])],
+             'avl_increment_amount' => ['nullable', 'numeric', 'min:0', 'max:99999999999.99'],
+             'other_suppliers_increment_amount' => ['nullable', 'numeric', 'min:0', 'max:99999999999.99'],
+             'massage_increment_amount' => ['nullable', 'numeric', 'min:0', 'max:99999999999.99'],
+@@ -119,7 +119,7 @@ protected function passedValidation(): void
+     {
+         $income = array_intersect_key($this->validated(), config('accounting.pos.income_fields'));
+         $gross = Money::sum($income);
+-        if ($gross !== 0 || in_array($this->input('calculation_version'), ['sales_format_2', 'sales_format_3', 'sales_format_4'], true) || Money::cents($this->input('complimentary_room_amount')) !== 0) {
++        if ($gross !== 0 || in_array($this->input('calculation_version'), ['sales_format_2', 'sales_format_3', 'sales_format_4', 'sales_format_5'], true) || Money::cents($this->input('complimentary_room_amount')) !== 0) {
+             if ($this->boolean('post_now')) {
+                 throw ValidationException::withMessages([
+                     'post_now' => 'Save the entry to review its calculated workbook journal before ledger posting.',
+diff --git a/app/Imports/PosEntryImport.php b/app/Imports/PosEntryImport.php
+index d022982..5aa1d44 100644
+--- a/app/Imports/PosEntryImport.php
++++ b/app/Imports/PosEntryImport.php
+@@ -75,7 +75,7 @@ public function collection(Collection $rows): void
+                 try {
+                     $data = [
+                         'branch_id' => $this->branchId,
+-                        'calculation_version' => isset($columns['laundry_increment_amount']) ? 'sales_format_4' : (isset($columns['key_card_increment_amount']) || isset($columns['massage_increment_amount']) ? 'sales_format_3' : 'sales_format_2'),
++                        'calculation_version' => isset($columns['ar_employee_amount']) ? 'sales_format_5' : (isset($columns['laundry_increment_amount']) ? 'sales_format_4' : (isset($columns['key_card_increment_amount']) || isset($columns['massage_increment_amount']) ? 'sales_format_3' : 'sales_format_2')),
+                     ];
+                     foreach ($columns as $field => $column) {
+                         $value = $row->get($column);
+@@ -93,6 +93,9 @@ public function collection(Collection $rows): void
+                     ] as $field => $options) {
+                         $data[$field] = $this->option($data[$field] ?? null, $options);
+                     }
++                    if ($data['calculation_version'] === 'sales_format_5') {
++                        $data = $this->noOtherIncomeDiscount($data);
++                    }
+                     $rate = $data['withholding_tax_rate'] ?? null;
+                     if ($this->normalize((string) $rate) === 'none') {
+                         $rate = 0;
+@@ -118,7 +121,7 @@ public function collection(Collection $rows): void
+                         'status' => 'draft',
+                         'created_by' => $this->user?->id,
+                     ]);
+-                    if (in_array($pos->calculation_version, ['sales_format_3', 'sales_format_4'], true)) {
++                    if (in_array($pos->calculation_version, ['sales_format_3', 'sales_format_4', 'sales_format_5'], true)) {
+                         app(JournalEntryService::class)->savePosDraft($pos, $this->user);
+                     }
+                 } catch (ValidationException $exception) {
+@@ -160,7 +163,7 @@ protected function headers(Collection $row): array
+             'vat_classification' => ['vatable', 'vat classification'],
+             'withholding_tax_rate' => ['wittholding tax', 'withholding tax', 'withholding tax rate'],
+             'discount_type' => ['discounts', 'discount type'],
+-            'discount_rate' => ['discount rate', 'discount percentage'],
++            'discount_rate' => ['discount rate', 'discount percentage', 'percentage discount'],
+             'basic_room_rate_amount' => ['basic room rates', 'basic room rates (exclusive of discounts - corporate/gov\'t dsicount)', 'basic room rates (exclusive of discounts - corporate/gov\'t discount)'],
+             'complimentary_room_amount' => ['complementary room (no charge - visitors)', 'complimentary room (no charge - visitors)', 'complementary room', 'complimentary room'],
+             'laundry_amount' => [
+@@ -174,6 +177,7 @@ protected function headers(Collection $row): array
+             'bank_transfer_amount' => ['bank transfer & qr ph', 'bank transfer', 'bank transfer, qr ph, online booking'],
+             'online_booking_amount' => ['online booking'],
+             'accounts_receivable_amount' => ['send bill'],
++            'ar_employee_amount' => ['ar employees', 'ar employee'],
+             'gift_voucher_amount' => ['gift voucher'],
+         ];
+         foreach (config('accounting.pos.income_fields') as $field => $label) {
+@@ -192,6 +196,31 @@ protected function headers(Collection $row): array
+         return $columns;
+     }
+ 
++    /**
++     * "Maxi (sample entry) (no OI)": the Discounts column holds a plain description
++     * (None / Employee / Senior Citizen / PWD) and the next column the rate as an
++     * Excel fraction (0.25 = 25%). A rate with description "None" is a promo.
++     */
++    protected function noOtherIncomeDiscount(array $data): array
++    {
++        $rate = $data['discount_rate'] ?? null;
++        if (is_numeric($rate) && $rate > 0 && $rate < 1) {
++            $rate *= 100;
++        }
++        $data['discount_rate'] = $rate === '' ? null : $rate;
++
++        $type = $this->normalize((string) ($data['discount_type'] ?? ''));
++        $data['discount_type'] = match (true) {
++            str_contains($type, 'senior') => 'senior_20',
++            str_contains($type, 'pwd') => 'pwd_20',
++            str_contains($type, 'employee') => 'employee_25',
++            in_array($type, ['', 'none'], true) => is_numeric($rate) && $rate > 0 ? 'promo' : 'none',
++            default => $data['discount_type'],
++        };
++
++        return $data;
++    }
++
+     protected function normalize(string $value): string
+     {
+         return strtolower(trim(preg_replace('/\s+/', ' ', str_replace('.', '', $value))));
+diff --git a/app/Models/PosEntry.php b/app/Models/PosEntry.php
+index c1963b1..607ee98 100644
+--- a/app/Models/PosEntry.php
++++ b/app/Models/PosEntry.php
+@@ -63,6 +63,7 @@
+     'bank_transfer_amount',
+     'cheque_amount',
+     'accounts_receivable_amount',
++    'ar_employee_amount',
+     'room_post_amount',
+     'gift_voucher_amount',
+     'other_payment_amount',
+@@ -109,6 +110,7 @@ protected function casts(): array
+             'avl_amount' => 'decimal:2',
+             'other_income_amount' => 'decimal:2',
+             'online_booking_amount' => 'decimal:2',
++            'ar_employee_amount' => 'decimal:2',
+             'withholding_tax_amount' => 'decimal:2',
+             'gross_sales' => 'decimal:2',
+             'discount_amount' => 'decimal:2',
+@@ -169,7 +171,7 @@ public function isDraft(): bool
+ 
+     public function hasIncomeDetails(): bool
+     {
+-        return in_array($this->calculation_version, ['sales_format_2', 'sales_format_3', 'sales_format_4'], true)
++        return in_array($this->calculation_version, ['sales_format_2', 'sales_format_3', 'sales_format_4', 'sales_format_5'], true)
+             || Money::cents($this->complimentary_room_amount) !== 0
+             || Money::sum(array_map(
+             fn (string $field) => $this->{$field},
+@@ -212,7 +214,7 @@ public function tenderedCents(): int
+      */
+     public function expectedTenderCents(): int
+     {
+-        if (in_array($this->calculation_version, ['sales_format_2', 'sales_format_3', 'sales_format_4'], true)) {
++        if (in_array($this->calculation_version, ['sales_format_2', 'sales_format_3', 'sales_format_4', 'sales_format_5'], true)) {
+             return Money::cents($this->amount_due);
+         }
+         if ($this->hasIncomeDetails()) {
+diff --git a/app/Services/PosPostingService.php b/app/Services/PosPostingService.php
+index 00bca71..b467b8f 100644
+--- a/app/Services/PosPostingService.php
++++ b/app/Services/PosPostingService.php
+@@ -390,7 +390,7 @@ public function resolvedConfig(?Branch $branch): array
+ 
+     public function workbookPreview(PosEntry $pos): array
+     {
+-        if (in_array($pos->calculation_version, ['sales_format_3', 'sales_format_4'], true)) {
++        if (in_array($pos->calculation_version, ['sales_format_3', 'sales_format_4', 'sales_format_5'], true)) {
+             return $pos->journalEntry?->workbook_snapshot ?? app(PosWorkbookService::class)->preview($pos);
+         }
+         $calculated = app(PosSalesCalculationService::class)->calculate($pos->getAttributes());
+diff --git a/app/Services/PosSalesCalculationService.php b/app/Services/PosSalesCalculationService.php
+index 8c99e69..ad238c4 100644
+--- a/app/Services/PosSalesCalculationService.php
++++ b/app/Services/PosSalesCalculationService.php
+@@ -8,6 +8,9 @@ class PosSalesCalculationService
+ {
+     public function calculate(array $data): array
+     {
++        if (($data['calculation_version'] ?? null) === 'sales_format_5') {
++            return $this->calculateNoOtherIncome($data);
++        }
+         $sum = fn (array $fields): int => Money::sum(array_map(fn (string $field) => $data[$field] ?? 0, $fields));
+         $room = $sum(config('accounting.pos.room_fields'));
+         $income = $sum(array_keys(config('accounting.pos.income_fields')));
+@@ -82,6 +85,65 @@ public function calculate(array $data): array
+         ];
+     }
+ 
++    /**
++     * "Maxi (sample entry) (no OI)": room charges only (G–K), no other-income columns.
++     *
++     * - Senior/PWD (and Non-VATable / VAT Exempt) sales are VAT-exempt: revenue = gross ÷ 1.12.
++     * - Senior/PWD discount = 20% of gross ÷ 1.12; Employee = 25% of gross; promo = entered % of gross.
++     * - VATable: withholding = gross ÷ 1.12 × rate; output VAT = (gross − gift voucher − discount) ÷ 1.12 × 12%
++     *   (never below zero; gift-voucher VAT is recognised when the voucher is issued);
++     *   room revenue = gross − output VAT.
++     * - Amount due = what the guest actually pays = gross − discount − withholding (exempt: gross ÷ 1.12 − …).
++     * - Complementary rooms carry no JE amount and are excluded from gross.
++     */
++    protected function calculateNoOtherIncome(array $data): array
++    {
++        $sum = fn (array $fields): int => Money::sum(array_map(fn (string $field) => $data[$field] ?? 0, $fields));
++        $room = $sum(config('accounting.pos.room_fields'));
++        $payments = $sum(config('accounting.pos.payment_fields'));
++        $gift = Money::cents($data['gift_voucher_amount'] ?? 0);
++        $gross = $room;
++
++        $discountType = $data['discount_type'] ?? null;
++        $classification = $data['vat_classification'] ?? null;
++        $exemptSale = in_array($classification, ['non_vatable', 'vat_exempt'], true)
++            || in_array($discountType, ['senior_20', 'pwd_20'], true);
++        $vatable = $classification === 'vatable' && ! $exemptSale;
++
++        $discountRate = $discountType === null || $discountType === '' ? 0 : config('accounting.pos.discount_rates.'.$discountType);
++        $discountRate ??= $data['discount_rate'] ?? null;
++        $whtRate = (float) ($data['withholding_tax_rate'] ?? 0);
++
++        $exempt = $exemptSale ? $gross / 1.12 : 0;
++        $taxable = $vatable ? $gross / 1.12 : 0;
++        $discountBase = $exemptSale ? $exempt : $gross;
++        $discount = $discountBase * (float) ($discountRate ?? 0) / 100;
++        $withholding = ($exemptSale ? $exempt : $gross / 1.12) * $whtRate / 100;
++        $vat = $vatable ? max(0, $gross - $gift - $discount) / 1.12 * 0.12 : 0;
++        $due = ($exemptSale ? $exempt : $gross) - $discount - $withholding;
++        $roomRevenue = $exemptSale ? $exempt : $gross - $vat;
++
++        return [
++            'calculation_version' => 'sales_format_5',
++            'income_total' => $room,
++            'room_total' => $room,
++            'payments_total' => $payments,
++            'gross_sales' => $gross,
++            'taxable_amount' => $taxable,
++            'exempted_amount' => $exempt,
++            'vat_amount' => $vat,
++            'discount_amount' => $discount,
++            'withholding_tax_amount' => $withholding,
++            'amount_due' => $due,
++            'net_sales' => ($exemptSale ? $exempt : $gross - $vat) - $discount,
++            'room_revenue' => $roomRevenue,
++            'discount_rate' => $discountRate === null ? null : (float) $discountRate,
++            'discount_base' => $discountBase,
++            'withholding_base' => $exemptSale ? $exempt : $gross / 1.12,
++            'missing_inputs' => $discountRate === null ? ['Discount percentage'] : [],
++        ];
++    }
++
+     public function attributes(array $data): array
+     {
+         $calculated = $this->calculate($data);
+diff --git a/app/Services/PosWorkbookService.php b/app/Services/PosWorkbookService.php
+index 28ce03a..f2d001c 100644
+--- a/app/Services/PosWorkbookService.php
++++ b/app/Services/PosWorkbookService.php
+@@ -9,6 +9,9 @@ class PosWorkbookService
+ {
+     public function preview(PosEntry $pos): array
+     {
++        if ($pos->calculation_version === 'sales_format_5') {
++            return $this->noOtherIncomePreview($pos);
++        }
+         if ($pos->calculation_version === 'sales_format_4') {
+             return $this->finalPreview($pos);
+         }
+@@ -90,6 +93,53 @@ public function preview(PosEntry $pos): array
+         ];
+     }
+ 
++    /**
++     * Draft journal for "Maxi (sample entry) (no OI)". Discounts sit on the DEBIT side here.
++     */
++    protected function noOtherIncomePreview(PosEntry $pos): array
++    {
++        $sales = app(PosSalesCalculationService::class)->calculate($pos->getAttributes());
++        $config = app(PosPostingService::class)->resolvedConfig($pos->branch);
++        $suffix = config('accounting.branch_suffixes.'.$pos->branch?->code);
++        $resolve = fn (mixed $code) => is_array($code) ? ($code[$suffix ?? ''] ?? null) : $code;
++        $money = fn (string $field): int => Money::cents($pos->{$field});
++        $accounts = $config['workbook_accounts'];
++        $rows = [];
++        $append = function (string $label, string $side, ?float $cents, mixed $code, string $basis) use (&$rows, $resolve): void {
++            $rows[] = ['label' => $label, 'side' => $side, 'amount' => $cents, 'code' => $resolve($code), 'basis' => $basis];
++        };
++        $append('Cash on Hand', 'debit', $money('cash_amount'), $config['settlement_accounts']['cash_amount'], 'Cash payment');
++        $append('Debit/Credit Card', 'debit', $money('card_amount'), $config['settlement_accounts']['card_amount'], 'Card payment');
++        $append('Cash in Bank', 'debit', $money('bank_transfer_amount') + $money('gcash_qrph_amount') + $money('online_booking_amount'), $config['settlement_accounts']['bank_transfer_amount'], 'Bank transfer, QR Ph, online booking');
++        $append('Accounts Receivable', 'debit', $money('accounts_receivable_amount'), $config['settlement_accounts']['accounts_receivable_amount'], 'Send bill');
++        $append('Receivable from Employee - Salary Deduction', 'debit', $money('ar_employee_amount'), $config['settlement_accounts']['ar_employee_amount'], 'AR Employees');
++        $append('Unearned Revenue - Gift Voucher', 'debit', $money('gift_voucher_amount'), $accounts['gift_voucher'], 'Gift voucher amount as entered');
++        foreach (['cheque_amount', 'room_post_amount', 'other_payment_amount'] as $field) {
++            if ($money($field) !== 0) {
++                $append($config['payment_labels'][$field], 'debit', $money($field), $config['settlement_accounts'][$field], 'Additional payment entered on this invoice');
++            }
++        }
++        foreach ([
++            'senior_20' => 'Discount - Senior Citizen', 'employee_25' => 'Discount - Employee',
++            'pwd_20' => 'Discount - PWD', 'promo' => 'Promo Discount',
++            'special_open' => 'Special Open Discount', 'corporate_government' => "Discount - Corporate & Gov't",
++        ] as $type => $label) {
++            $value = $pos->discount_type === $type ? ($sales['discount_rate'] === null ? null : $sales['discount_amount']) : 0;
++            $append($label, 'debit', $value, $config['discount_accounts'][$type], 'Selected discount');
++        }
++        $append('Creditable Withholding Tax', 'debit', $sales['withholding_tax_amount'], $config['withholding_tax_account'], 'Room gross ÷ 1.12 × withholding percentage');
++        $append('Output Tax', 'credit', $sales['vat_amount'], $config['vat_payable_account'], '(Room gross − gift voucher − discount) ÷ 1.12 × 12%, VATable only');
++        $append('Room Revenue', 'credit', $sales['room_revenue'], $config['revenue_account'], 'VATable: room gross − output tax. Senior/PWD, Non-VATable, VAT Exempt: room gross ÷ 1.12');
++        $debits = array_sum(array_map(fn (array $row) => $row['side'] === 'debit' ? ($row['amount'] ?? 0) : 0, $rows));
++        $credits = array_sum(array_map(fn (array $row) => $row['side'] === 'credit' ? ($row['amount'] ?? 0) : 0, $rows));
++
++        return [
++            'sales' => $sales, 'rows' => $rows, 'debits' => $debits, 'credits' => $credits,
++            'difference' => $debits - $credits,
++            'complete' => ! in_array(null, array_column($rows, 'amount'), true),
++        ];
++    }
++
+     protected function finalPreview(PosEntry $pos): array
+     {
+         $sales = app(PosSalesCalculationService::class)->calculate($pos->getAttributes());
+diff --git a/config/accounting.php b/config/accounting.php
+index 9e80c32..4ce975a 100644
+--- a/config/accounting.php
++++ b/config/accounting.php
+@@ -121,6 +121,7 @@
+             'bank_transfer_amount',
+             'cheque_amount',
+             'accounts_receivable_amount',
++            'ar_employee_amount',
+             'room_post_amount',
+             'gift_voucher_amount',
+             'other_payment_amount',
+@@ -133,6 +134,7 @@
+             'bank_transfer_amount' => ['01' => '1102-01', '02' => '1102-02'],
+             'cheque_amount' => ['01' => '1107-01', '02' => '1107-02'],
+             'accounts_receivable_amount' => ['01' => '1301-01', '02' => '1310-02'],
++            'ar_employee_amount' => ['01' => '1402-01', '02' => '1402-02'],
+             'room_post_amount' => ['01' => '1301-01', '02' => '1314-02'],
+             'online_booking_amount' => ['01' => '1312-01', '02' => '1312-02'],
+             'gift_voucher_amount' => ['01' => '1311-01', '02' => '1311-02'],
+@@ -145,6 +147,7 @@
+             'bank_transfer_amount' => 'Bank transfer, QR Ph, online booking',
+             'cheque_amount' => 'Cheque',
+             'accounts_receivable_amount' => 'Send bill',
++            'ar_employee_amount' => 'AR Employees',
+             'room_post_amount' => 'Room post',
+             'online_booking_amount' => 'Online booking',
+             'gift_voucher_amount' => 'Gift voucher',
+diff --git a/database/migrations/2026_11_20_000001_add_ar_employee_amount_to_pos_entries.php b/database/migrations/2026_11_20_000001_add_ar_employee_amount_to_pos_entries.php
+new file mode 100644
+index 0000000..df234b7
+--- /dev/null
++++ b/database/migrations/2026_11_20_000001_add_ar_employee_amount_to_pos_entries.php
+@@ -0,0 +1,22 @@
++<?php
++
++use Illuminate\Database\Migrations\Migration;
++use Illuminate\Database\Schema\Blueprint;
++use Illuminate\Support\Facades\Schema;
++
++return new class extends Migration
++{
++    public function up(): void
++    {
++        Schema::table('pos_entries', function (Blueprint $table) {
++            $table->decimal('ar_employee_amount', 15, 2)->default(0)->after('accounts_receivable_amount');
++        });
++    }
++
++    public function down(): void
++    {
++        Schema::table('pos_entries', function (Blueprint $table) {
++            $table->dropColumn('ar_employee_amount');
++        });
++    }
++};
+diff --git a/resources/js/components/pos/pos-workbook-preview.tsx b/resources/js/components/pos/pos-workbook-preview.tsx
+index 631a619..b744572 100644
+--- a/resources/js/components/pos/pos-workbook-preview.tsx
++++ b/resources/js/components/pos/pos-workbook-preview.tsx
+@@ -114,11 +114,11 @@ export function PosWorkbookCalculation({
+                                     currency,
+                                 )}
+                                 .
+-                                {["sales_format_3", "sales_format_4"].includes(preview.sales.calculation_version ?? "")
++                                {["sales_format_3", "sales_format_4", "sales_format_5"].includes(preview.sales.calculation_version ?? "")
+                                     ? ` Plus complementary rooms (N) ${formatCents(preview.sales.gross_sales - preview.sales.income_total, currency)}; payments excluded.`
+                                     : ` Plus payments ${formatCents(preview.sales.payments_total, currency)}; complementary rooms excluded.`}
+                             </p>
+-                            {["sales_format_3", "sales_format_4"].includes(preview.sales.calculation_version ?? "") && (
++                            {["sales_format_3", "sales_format_4", "sales_format_5"].includes(preview.sales.calculation_version ?? "") && (
+                                 <p>
+                                     Workbook totals retain unrounded formula
+                                     precision (including the variance). Saved
+@@ -175,7 +175,7 @@ export function PosWorkbookCalculation({
+             <Card>
+                 <CardHeader>
+                     <CardTitle>
+-                        {["sales_format_3", "sales_format_4"].includes(preview.sales.calculation_version ?? "")
++                        {["sales_format_3", "sales_format_4", "sales_format_5"].includes(preview.sales.calculation_version ?? "")
+                             ? "Saved draft journal — workbook calculation"
+                             : "Journal entry preview"}
+                     </CardTitle>
+diff --git a/tests/Unit/PosNoOtherIncomeCalculationTest.php b/tests/Unit/PosNoOtherIncomeCalculationTest.php
+new file mode 100644
+index 0000000..3c4c40e
+--- /dev/null
++++ b/tests/Unit/PosNoOtherIncomeCalculationTest.php
+@@ -0,0 +1,49 @@
++<?php
++
++use App\Services\PosSalesCalculationService;
++use Tests\TestCase;
++
++uses(TestCase::class);
++
++// Sheet: "Maxi (sample entry) (no OI)" — expected figures come from its JE block.
++function noOi(array $data): array
++{
++    return app(PosSalesCalculationService::class)->calculate([...$data, 'calculation_version' => 'sales_format_5']);
++}
++
++it('computes 001236: gift voucher excluded from output VAT, 2% withholding', function () {
++    $r = noOi([
++        'basic_room_rate_amount' => 2588, 'early_check_in_out_amount' => 1200,
++        'accounts_receivable_amount' => 720.36, 'gift_voucher_amount' => 3000,
++        'vat_classification' => 'vatable', 'withholding_tax_rate' => 2, 'discount_type' => 'none',
++    ]);
++    expect(round($r['withholding_tax_amount']))->toBe(6764.0)
++        ->and(round($r['vat_amount']))->toBe(8443.0)
++        ->and(round($r['room_revenue']))->toBe(370357.0)
++        ->and(round($r['amount_due']))->toBe(372036.0);
++});
++
++it('computes 001240: employee 25% discount reduces the VAT base', function () {
++    $r = noOi([
++        'basic_room_rate_amount' => 5976, 'vat_classification' => 'vatable', 'discount_type' => 'employee_25',
++    ]);
++    expect(round($r['discount_amount']))->toBe(149400.0)
++        ->and(round($r['vat_amount']))->toBe(48021.0)
++        ->and(round($r['room_revenue']))->toBe(549579.0)
++        ->and(round($r['amount_due']))->toBe(448200.0);
++});
++
++it('treats senior and PWD as VAT-exempt even when marked VATable', function () {
++    foreach (['senior_20', 'pwd_20'] as $type) {
++        $r = noOi(['basic_room_rate_amount' => 2988, 'vat_classification' => 'vatable', 'discount_type' => $type]);
++        expect(round($r['discount_amount']))->toBe(53357.0)
++            ->and($r['vat_amount'])->toBe(0)
++            ->and(round($r['room_revenue']))->toBe(266786.0)
++            ->and(round($r['amount_due']))->toBe(213429.0);
++    }
++});
++
++it('computes 001243: VAT exempt sale is gross divided by 1.12', function () {
++    $r = noOi(['basic_room_rate_amount' => 15564, 'vat_classification' => 'vat_exempt', 'discount_type' => 'none']);
++    expect(round($r['room_revenue']))->toBe(1389643.0)->and(round($r['amount_due']))->toBe(1389643.0);
++});
+-- 
+2.43.0

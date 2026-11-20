@@ -9,6 +9,9 @@ class PosWorkbookService
 {
     public function preview(PosEntry $pos): array
     {
+        if ($pos->calculation_version === 'sales_format_5') {
+            return $this->noOtherIncomePreview($pos);
+        }
         if ($pos->calculation_version === 'sales_format_4') {
             return $this->finalPreview($pos);
         }
@@ -85,6 +88,53 @@ class PosWorkbookService
             'rows' => $rows,
             'debits' => $debits,
             'credits' => $credits,
+            'difference' => $debits - $credits,
+            'complete' => ! in_array(null, array_column($rows, 'amount'), true),
+        ];
+    }
+
+    /**
+     * Draft journal for "Maxi (sample entry) (no OI)". Discounts sit on the DEBIT side here.
+     */
+    protected function noOtherIncomePreview(PosEntry $pos): array
+    {
+        $sales = app(PosSalesCalculationService::class)->calculate($pos->getAttributes());
+        $config = app(PosPostingService::class)->resolvedConfig($pos->branch);
+        $suffix = config('accounting.branch_suffixes.'.$pos->branch?->code);
+        $resolve = fn (mixed $code) => is_array($code) ? ($code[$suffix ?? ''] ?? null) : $code;
+        $money = fn (string $field): int => Money::cents($pos->{$field});
+        $accounts = $config['workbook_accounts'];
+        $rows = [];
+        $append = function (string $label, string $side, ?float $cents, mixed $code, string $basis) use (&$rows, $resolve): void {
+            $rows[] = ['label' => $label, 'side' => $side, 'amount' => $cents, 'code' => $resolve($code), 'basis' => $basis];
+        };
+        $append('Cash on Hand', 'debit', $money('cash_amount'), $config['settlement_accounts']['cash_amount'], 'Cash payment');
+        $append('Debit/Credit Card', 'debit', $money('card_amount'), $config['settlement_accounts']['card_amount'], 'Card payment');
+        $append('Cash in Bank', 'debit', $money('bank_transfer_amount') + $money('gcash_qrph_amount') + $money('online_booking_amount'), $config['settlement_accounts']['bank_transfer_amount'], 'Bank transfer, QR Ph, online booking');
+        $append('Accounts Receivable', 'debit', $money('accounts_receivable_amount'), $config['settlement_accounts']['accounts_receivable_amount'], 'Send bill');
+        $append('Receivable from Employee - Salary Deduction', 'debit', $money('ar_employee_amount'), $config['settlement_accounts']['ar_employee_amount'], 'AR Employees');
+        $append('Unearned Revenue - Gift Voucher', 'debit', $money('gift_voucher_amount'), $accounts['gift_voucher'], 'Gift voucher amount as entered');
+        foreach (['cheque_amount', 'room_post_amount', 'other_payment_amount'] as $field) {
+            if ($money($field) !== 0) {
+                $append($config['payment_labels'][$field], 'debit', $money($field), $config['settlement_accounts'][$field], 'Additional payment entered on this invoice');
+            }
+        }
+        foreach ([
+            'senior_20' => 'Discount - Senior Citizen', 'employee_25' => 'Discount - Employee',
+            'pwd_20' => 'Discount - PWD', 'promo' => 'Promo Discount',
+            'special_open' => 'Special Open Discount', 'corporate_government' => "Discount - Corporate & Gov't",
+        ] as $type => $label) {
+            $value = $pos->discount_type === $type ? ($sales['discount_rate'] === null ? null : $sales['discount_amount']) : 0;
+            $append($label, 'debit', $value, $config['discount_accounts'][$type], 'Selected discount');
+        }
+        $append('Creditable Withholding Tax', 'debit', $sales['withholding_tax_amount'], $config['withholding_tax_account'], 'Room gross ÷ 1.12 × withholding percentage');
+        $append('Output Tax', 'credit', $sales['vat_amount'], $config['vat_payable_account'], '(Room gross − gift voucher − discount) ÷ 1.12 × 12%, VATable only');
+        $append('Room Revenue', 'credit', $sales['room_revenue'], $config['revenue_account'], 'VATable: room gross − output tax. Senior/PWD, Non-VATable, VAT Exempt: room gross ÷ 1.12');
+        $debits = array_sum(array_map(fn (array $row) => $row['side'] === 'debit' ? ($row['amount'] ?? 0) : 0, $rows));
+        $credits = array_sum(array_map(fn (array $row) => $row['side'] === 'credit' ? ($row['amount'] ?? 0) : 0, $rows));
+
+        return [
+            'sales' => $sales, 'rows' => $rows, 'debits' => $debits, 'credits' => $credits,
             'difference' => $debits - $credits,
             'complete' => ! in_array(null, array_column($rows, 'amount'), true),
         ];

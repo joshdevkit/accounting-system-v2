@@ -8,6 +8,9 @@ class PosSalesCalculationService
 {
     public function calculate(array $data): array
     {
+        if (($data['calculation_version'] ?? null) === 'sales_format_5') {
+            return $this->calculateNoOtherIncome($data);
+        }
         $sum = fn (array $fields): int => Money::sum(array_map(fn (string $field) => $data[$field] ?? 0, $fields));
         $room = $sum(config('accounting.pos.room_fields'));
         $income = $sum(array_keys(config('accounting.pos.income_fields')));
@@ -78,6 +81,65 @@ class PosSalesCalculationService
             'discount_rate' => $discountRate === null ? null : (float) $discountRate,
             'discount_base' => $discountBase,
             'withholding_base' => $taxable,
+            'missing_inputs' => $discountRate === null ? ['Discount percentage'] : [],
+        ];
+    }
+
+    /**
+     * "Maxi (sample entry) (no OI)": room charges only (G–K), no other-income columns.
+     *
+     * - Senior/PWD (and Non-VATable / VAT Exempt) sales are VAT-exempt: revenue = gross ÷ 1.12.
+     * - Senior/PWD discount = 20% of gross ÷ 1.12; Employee = 25% of gross; promo = entered % of gross.
+     * - VATable: withholding = gross ÷ 1.12 × rate; output VAT = (gross − gift voucher − discount) ÷ 1.12 × 12%
+     *   (never below zero; gift-voucher VAT is recognised when the voucher is issued);
+     *   room revenue = gross − output VAT.
+     * - Amount due = what the guest actually pays = gross − discount − withholding (exempt: gross ÷ 1.12 − …).
+     * - Complementary rooms carry no JE amount and are excluded from gross.
+     */
+    protected function calculateNoOtherIncome(array $data): array
+    {
+        $sum = fn (array $fields): int => Money::sum(array_map(fn (string $field) => $data[$field] ?? 0, $fields));
+        $room = $sum(config('accounting.pos.room_fields'));
+        $payments = $sum(config('accounting.pos.payment_fields'));
+        $gift = Money::cents($data['gift_voucher_amount'] ?? 0);
+        $gross = $room;
+
+        $discountType = $data['discount_type'] ?? null;
+        $classification = $data['vat_classification'] ?? null;
+        $exemptSale = in_array($classification, ['non_vatable', 'vat_exempt'], true)
+            || in_array($discountType, ['senior_20', 'pwd_20'], true);
+        $vatable = $classification === 'vatable' && ! $exemptSale;
+
+        $discountRate = $discountType === null || $discountType === '' ? 0 : config('accounting.pos.discount_rates.'.$discountType);
+        $discountRate ??= $data['discount_rate'] ?? null;
+        $whtRate = (float) ($data['withholding_tax_rate'] ?? 0);
+
+        $exempt = $exemptSale ? $gross / 1.12 : 0;
+        $taxable = $vatable ? $gross / 1.12 : 0;
+        $discountBase = $exemptSale ? $exempt : $gross;
+        $discount = $discountBase * (float) ($discountRate ?? 0) / 100;
+        $withholding = ($exemptSale ? $exempt : $gross / 1.12) * $whtRate / 100;
+        $vat = $vatable ? max(0, $gross - $gift - $discount) / 1.12 * 0.12 : 0;
+        $due = ($exemptSale ? $exempt : $gross) - $discount - $withholding;
+        $roomRevenue = $exemptSale ? $exempt : $gross - $vat;
+
+        return [
+            'calculation_version' => 'sales_format_5',
+            'income_total' => $room,
+            'room_total' => $room,
+            'payments_total' => $payments,
+            'gross_sales' => $gross,
+            'taxable_amount' => $taxable,
+            'exempted_amount' => $exempt,
+            'vat_amount' => $vat,
+            'discount_amount' => $discount,
+            'withholding_tax_amount' => $withholding,
+            'amount_due' => $due,
+            'net_sales' => ($exemptSale ? $exempt : $gross - $vat) - $discount,
+            'room_revenue' => $roomRevenue,
+            'discount_rate' => $discountRate === null ? null : (float) $discountRate,
+            'discount_base' => $discountBase,
+            'withholding_base' => $exemptSale ? $exempt : $gross / 1.12,
             'missing_inputs' => $discountRate === null ? ['Discount percentage'] : [],
         ];
     }
