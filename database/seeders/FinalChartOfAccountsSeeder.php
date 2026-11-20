@@ -67,13 +67,7 @@ class FinalChartOfAccountsSeeder extends Seeder
             // New workbook numbering for accrued expenses and the remaining balance-sheet sections.
             '5000' => ['4300', true, null],
             '6000' => ['5000', true, null],
-            '6100' => ['5100', true, null],
-            '6101-01' => ['5101-01', true, null],
-            '6101-02' => ['5101-02', true, null],
-            '6102-01' => ['5102-01', true, null],
-            '6102-02' => ['5102-02', true, null],
-            '6103-01' => ['5103-01', true, null],
-            '6103-02' => ['5103-02', true, null],
+            '6100-02' => ['5101-02', true, null],
             '7000' => ['6000', true, null],
             '7100' => ['6100', true, null],
             '7101-01' => ['6101-01', true, null],
@@ -117,7 +111,13 @@ class FinalChartOfAccountsSeeder extends Seeder
             ])->save();
         }
 
+        Account::where('company_id', $company->id)->where('code', '6100-01')->update([
+            'is_active' => false,
+            'description' => 'LEGACY ACCOUNT. The final workbook lists Other Loans Payable only for Gusto.',
+        ]);
+
         $this->renameAccount($company, '5000', 'Non-Current Liabilities');
+        $this->ensureLoansPayableGroup($company);
         $this->renameAccount($company, '5100', 'Loans Payable');
         $this->renameAccount($company, '6000', 'Capital and Reserves');
         $this->renameAccount($company, '6100', 'Capital Stocks');
@@ -223,6 +223,28 @@ class FinalChartOfAccountsSeeder extends Seeder
                 'is_active' => false,
                 'description' => 'LEGACY ACCOUNT. Not listed as a separate group in the final accountant-approved workbook.',
             ]);
+    }
+
+    private function ensureLoansPayableGroup($company): void
+    {
+        $parent = Account::where('company_id', $company->id)->where('code', '5000')->first();
+        $type = AccountType::where('code', 'NCL')->firstOrFail();
+
+        $group = Account::updateOrCreate(
+            ['company_id' => $company->id, 'code' => '5100'],
+            [
+                'account_type_id' => $type->id,
+                'parent_id' => $parent?->id,
+                'name' => 'Loans Payable',
+                'description' => null,
+                'is_control_account' => false,
+                'is_active' => true,
+            ],
+        );
+
+        Account::where('company_id', $company->id)
+            ->where('code', '5101-02')
+            ->update(['parent_id' => $group->id]);
     }
 
     private function reconcileTradePayables($company): void
