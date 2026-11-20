@@ -75,7 +75,7 @@ class PosEntryImport implements ToCollection, WithCalculatedFormulas
                 try {
                     $data = [
                         'branch_id' => $this->branchId,
-                        'calculation_version' => isset($columns['laundry_increment_amount']) ? 'sales_format_4' : (isset($columns['key_card_increment_amount']) || isset($columns['massage_increment_amount']) ? 'sales_format_3' : 'sales_format_2'),
+                        'calculation_version' => isset($columns['ar_employee_amount']) ? 'sales_format_5' : (isset($columns['laundry_increment_amount']) ? 'sales_format_4' : (isset($columns['key_card_increment_amount']) || isset($columns['massage_increment_amount']) ? 'sales_format_3' : 'sales_format_2')),
                     ];
                     foreach ($columns as $field => $column) {
                         $value = $row->get($column);
@@ -92,6 +92,9 @@ class PosEntryImport implements ToCollection, WithCalculatedFormulas
                         'discount_type' => 'discount_types',
                     ] as $field => $options) {
                         $data[$field] = $this->option($data[$field] ?? null, $options);
+                    }
+                    if ($data['calculation_version'] === 'sales_format_5') {
+                        $data = $this->noOtherIncomeDiscount($data);
                     }
                     $rate = $data['withholding_tax_rate'] ?? null;
                     if ($this->normalize((string) $rate) === 'none') {
@@ -118,7 +121,7 @@ class PosEntryImport implements ToCollection, WithCalculatedFormulas
                         'status' => 'draft',
                         'created_by' => $this->user?->id,
                     ]);
-                    if (in_array($pos->calculation_version, ['sales_format_3', 'sales_format_4'], true)) {
+                    if (in_array($pos->calculation_version, ['sales_format_3', 'sales_format_4', 'sales_format_5'], true)) {
                         app(JournalEntryService::class)->savePosDraft($pos, $this->user);
                     }
                 } catch (ValidationException $exception) {
@@ -160,7 +163,7 @@ class PosEntryImport implements ToCollection, WithCalculatedFormulas
             'vat_classification' => ['vatable', 'vat classification'],
             'withholding_tax_rate' => ['wittholding tax', 'withholding tax', 'withholding tax rate'],
             'discount_type' => ['discounts', 'discount type'],
-            'discount_rate' => ['discount rate', 'discount percentage'],
+            'discount_rate' => ['discount rate', 'discount percentage', 'percentage discount'],
             'basic_room_rate_amount' => ['basic room rates', 'basic room rates (exclusive of discounts - corporate/gov\'t dsicount)', 'basic room rates (exclusive of discounts - corporate/gov\'t discount)'],
             'complimentary_room_amount' => ['complementary room (no charge - visitors)', 'complimentary room (no charge - visitors)', 'complementary room', 'complimentary room'],
             'laundry_amount' => [
@@ -174,6 +177,7 @@ class PosEntryImport implements ToCollection, WithCalculatedFormulas
             'bank_transfer_amount' => ['bank transfer & qr ph', 'bank transfer', 'bank transfer, qr ph, online booking'],
             'online_booking_amount' => ['online booking'],
             'accounts_receivable_amount' => ['send bill'],
+            'ar_employee_amount' => ['ar employees', 'ar employee'],
             'gift_voucher_amount' => ['gift voucher'],
         ];
         foreach (config('accounting.pos.income_fields') as $field => $label) {
@@ -190,6 +194,31 @@ class PosEntryImport implements ToCollection, WithCalculatedFormulas
         }
 
         return $columns;
+    }
+
+    /**
+     * "Maxi (sample entry) (no OI)": the Discounts column holds a plain description
+     * (None / Employee / Senior Citizen / PWD) and the next column the rate as an
+     * Excel fraction (0.25 = 25%). A rate with description "None" is a promo.
+     */
+    protected function noOtherIncomeDiscount(array $data): array
+    {
+        $rate = $data['discount_rate'] ?? null;
+        if (is_numeric($rate) && $rate > 0 && $rate < 1) {
+            $rate *= 100;
+        }
+        $data['discount_rate'] = $rate === '' ? null : $rate;
+
+        $type = $this->normalize((string) ($data['discount_type'] ?? ''));
+        $data['discount_type'] = match (true) {
+            str_contains($type, 'senior') => 'senior_20',
+            str_contains($type, 'pwd') => 'pwd_20',
+            str_contains($type, 'employee') => 'employee_25',
+            in_array($type, ['', 'none'], true) => is_numeric($rate) && $rate > 0 ? 'promo' : 'none',
+            default => $data['discount_type'],
+        };
+
+        return $data;
     }
 
     protected function normalize(string $value): string

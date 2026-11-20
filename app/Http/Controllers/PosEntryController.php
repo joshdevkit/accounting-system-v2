@@ -161,7 +161,7 @@ class PosEntryController extends Controller
                 'status' => 'draft',
                 'created_by' => $request->user()?->id,
             ]);
-            if (in_array($pos->calculation_version, ['sales_format_3', 'sales_format_4'], true)) {
+            if (in_array($pos->calculation_version, ['sales_format_3', 'sales_format_4', 'sales_format_5'], true)) {
                 app(JournalEntryService::class)->savePosDraft($pos, $request->user());
             }
 
@@ -351,7 +351,7 @@ class PosEntryController extends Controller
 
         DB::transaction(function () use ($posEntry, $request) {
             $posEntry->fill(collect($request->validated())->except('post_now')->all())->save();
-            if (in_array($posEntry->calculation_version, ['sales_format_3', 'sales_format_4'], true)) {
+            if (in_array($posEntry->calculation_version, ['sales_format_3', 'sales_format_4', 'sales_format_5'], true)) {
                 app(JournalEntryService::class)->savePosDraft($posEntry, $request->user());
             }
         });
@@ -432,7 +432,9 @@ class PosEntryController extends Controller
             $file = $request->file('file');
             $names = IOFactory::createReaderForFile($file->getRealPath())->listWorksheetNames($file->getRealPath());
             $branch = $company->branches()->findOrFail($data['branch_id']);
-            $sheet = collect($names)->first(fn (string $name): bool => strcasecmp($name, $branch->code.' (Final)') === 0)
+            // Interim: Accounting wants the "no Other Income" sample sheet used for now.
+            $sheet = collect($names)->first(fn (string $name): bool => strcasecmp($name, $branch->code.' (sample entry) (no OI)') === 0)
+                ?? collect($names)->first(fn (string $name): bool => strcasecmp($name, $branch->code.' (Final)') === 0)
                 ?? collect($names)->first(fn (string $name): bool => strcasecmp($name, 'Maxi (Final)') === 0 && strcasecmp($branch->code, 'MAXI') === 0)
                 ?? collect($names)->first(fn (string $name): bool => strcasecmp($name, $branch->code) === 0);
             if ($sheet === null && count($names) === 1) {
