@@ -64,7 +64,8 @@ class FinalChartOfAccountsSeeder extends Seeder
             '5101-02' => ['4301-02', true, null],
             '5100-02' => ['4302-02', false, 'PROVISIONAL CODE. The final workbook repeats 4301-02. Assigned 4302-02 pending accountant confirmation.'],
 
-            // New workbook numbering for the remaining balance-sheet sections.
+            // New workbook numbering for accrued expenses and the remaining balance-sheet sections.
+            '5000' => ['4300', true, null],
             '6000' => ['5000', true, null],
             '6100' => ['5100', true, null],
             '6101-01' => ['5101-01', true, null],
@@ -291,9 +292,45 @@ class FinalChartOfAccountsSeeder extends Seeder
 
     private function restoreSharedExpenseGroupName($company): void
     {
-        $this->renameAccount($company, '3100', 'Shared Expense');
-        $this->renameAccount($company, '3101-01', 'General & Administrative Expense (Maximilian)');
-        $this->renameAccount($company, '3101-02', 'General & Administrative Expense (Gusto)');
+        $type = AccountType::where('code', 'OA')->firstOrFail();
+
+        // The final workbook presents Shared Operating Cost (3000) as a
+        // summary group, with Shared Expense (3100) and its leaves beneath it.
+        $sharedOperatingCost = Account::updateOrCreate(
+            ['company_id' => $company->id, 'code' => '3000'],
+            [
+                'account_type_id' => $type->id,
+                'parent_id' => null,
+                'name' => 'Shared Operating Cost',
+                'description' => null,
+                'is_control_account' => false,
+                'is_active' => true,
+            ],
+        );
+
+        $sharedExpense = Account::where('company_id', $company->id)
+            ->where('code', '3100')
+            ->first();
+
+        if ($sharedExpense) {
+            $sharedExpense->forceFill([
+                'parent_id' => $sharedOperatingCost->id,
+                'name' => 'Shared Expense',
+            ])->save();
+
+            Account::where('company_id', $company->id)
+                ->whereIn('code', ['3101-01', '3101-02'])
+                ->update(['parent_id' => $sharedExpense->id]);
+        }
+
+        // The former working-paper setup used branch-specific 3000 leaves;
+        // those are replaced by the summary group in the final workbook.
+        Account::where('company_id', $company->id)
+            ->whereIn('code', ['3000-01', '3000-02'])
+            ->update([
+                'is_active' => false,
+                'description' => 'LEGACY ACCOUNT. Replaced by the Shared Operating Cost summary group in the final workbook.',
+            ]);
     }
 
     private function renameAccount($company, string $code, string $name): void
