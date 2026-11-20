@@ -1,0 +1,464 @@
+import { Link, useForm } from "@inertiajs/react";
+import { ArrowLeft, LoaderCircle, Save, Send } from "lucide-react";
+import { useMemo } from "react";
+import AuthenticatedLayout from "@/components/layouts/authenticated-layout";
+import { Button } from "@/components/ui/button";
+import {
+    Card,
+    CardContent,
+    CardDescription,
+    CardHeader,
+    CardTitle,
+} from "@/components/ui/card";
+import { Field } from "@/components/ui/field";
+import { Input } from "@/components/ui/input";
+import { Select } from "@/components/ui/select";
+import { Textarea } from "@/components/ui/textarea";
+import { amountToCents, formatCents } from "@/lib/format";
+import { AccountCombobox, AccountGroup } from "../journal/account-combobox";
+
+export type SaleFormData = {
+    branch_id: string;
+    sale_date: string;
+    due_date: string;
+    credit_account_id: number | "";
+    reference_no: string;
+    customer_name: string;
+    taxable_amount: string;
+    tax_type: "vatable" | "non_vat" | "vat_exempt";
+    withholding_tax_rate: string;
+    notes: string;
+    post_now: boolean;
+};
+
+export type SaleInitial = {
+    branch_id?: string | null;
+    sale_date: string;
+    due_date: string;
+    credit_account_id?: number | null;
+    reference_no?: string | null;
+    customer_name?: string | null;
+    taxable_amount?: number | string | null;
+    tax_type?: "vatable" | "non_vat" | "vat_exempt";
+    withholding_tax_rate?: number | string | null;
+    notes?: string | null;
+};
+
+export function SaleForm({
+    action,
+    method,
+    branches,
+    accountOptions,
+    withholdingRates,
+    vatRate,
+    currency,
+    initial,
+    backHref,
+    heading,
+}: {
+    action: string;
+    method: "post" | "put";
+    branches: { id: number; name: string; code: string }[];
+    accountOptions: AccountGroup[];
+    withholdingRates: { value: string; label: string }[];
+    vatRate: number;
+    currency: string;
+    initial: SaleInitial;
+    backHref: string;
+    heading: { title: string; description?: string };
+}) {
+    const form = useForm<SaleFormData>({
+        branch_id: initial.branch_id ?? "",
+        sale_date: initial.sale_date,
+        due_date: initial.due_date ?? "",
+        credit_account_id: initial.credit_account_id ?? "",
+        reference_no: initial.reference_no ?? "",
+        customer_name: initial.customer_name ?? "",
+        taxable_amount:
+            initial.taxable_amount === undefined ||
+            initial.taxable_amount === null
+                ? ""
+                : String(initial.taxable_amount),
+        tax_type: initial.tax_type ?? "non_vat",
+        withholding_tax_rate:
+            initial.withholding_tax_rate === undefined ||
+            initial.withholding_tax_rate === null
+                ? "0"
+                : String(initial.withholding_tax_rate),
+        notes: initial.notes ?? "",
+        post_now: false,
+    });
+
+    const { data, setData, processing, errors } = form;
+
+    const preview = useMemo(() => {
+        const taxable = amountToCents(data.taxable_amount);
+        const vat =
+            data.tax_type === "vatable" ? Math.round(taxable * vatRate) : 0;
+        const gross = taxable + vat;
+        const withholdingRate = Number(data.withholding_tax_rate || 0);
+        const withholding =
+            withholdingRate > 0
+                ? Math.round(taxable * (withholdingRate / 100))
+                : 0;
+        const netReceivable = gross - withholding;
+
+        return { taxable, vat, gross, withholding, netReceivable };
+    }, [
+        data.taxable_amount,
+        data.tax_type,
+        data.withholding_tax_rate,
+        vatRate,
+    ]);
+
+    const submit = (postNow: boolean) => {
+        form.transform((payload) => ({ ...payload, post_now: postNow }));
+        form[method === "put" ? "put" : "post"](action);
+    };
+
+    return (
+        <AuthenticatedLayout
+            title={heading.title}
+            description={heading.description}
+        >
+            <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_18rem]">
+                <div className="space-y-4">
+                    <Link
+                        href={backHref}
+                        className="text-muted-foreground hover:text-foreground inline-flex items-center gap-1.5 text-sm"
+                    >
+                        <ArrowLeft className="size-3.5" />
+                        Back to sales
+                    </Link>
+
+                    <form
+                        onSubmit={(event) => {
+                            event.preventDefault();
+                            submit(false);
+                        }}
+                        className="space-y-4"
+                    >
+                        <Card>
+                            <CardHeader>
+                                <CardTitle>Sale details</CardTitle>
+                                <CardDescription>
+                                    The invoice this sale is recording
+                                </CardDescription>
+                            </CardHeader>
+                            <CardContent className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                                <Field
+                                    label="Sale date"
+                                    htmlFor="sale_date"
+                                    error={errors.sale_date}
+                                >
+                                    <Input
+                                        id="sale_date"
+                                        type="date"
+                                        value={data.sale_date}
+                                        onChange={(event) =>
+                                            setData(
+                                                "sale_date",
+                                                event.target.value,
+                                            )
+                                        }
+                                        disabled={processing}
+                                    />
+                                </Field>
+
+                                <Field
+                                    label="Due date"
+                                    htmlFor="due_date"
+                                    error={errors.due_date}
+                                    hint="Defaults to 30 days after the sale date"
+                                >
+                                    <Input
+                                        id="due_date"
+                                        type="date"
+                                        value={data.due_date}
+                                        onChange={(event) =>
+                                            setData(
+                                                "due_date",
+                                                event.target.value,
+                                            )
+                                        }
+                                        disabled={processing}
+                                    />
+                                </Field>
+
+                                <Field
+                                    label="Branch"
+                                    htmlFor="branch_id"
+                                    error={errors.branch_id}
+                                    hint="Optional"
+                                >
+                                    <Select
+                                        id="branch_id"
+                                        value={data.branch_id}
+                                        onChange={(event) =>
+                                            setData(
+                                                "branch_id",
+                                                event.target.value,
+                                            )
+                                        }
+                                        disabled={processing}
+                                    >
+                                        <option value="">
+                                            No specific branch
+                                        </option>
+                                        {branches.map((branch) => (
+                                            <option
+                                                key={branch.id}
+                                                value={String(branch.id)}
+                                            >
+                                                {branch.code} · {branch.name}
+                                            </option>
+                                        ))}
+                                    </Select>
+                                </Field>
+
+                                <Field
+                                    label="Customer"
+                                    htmlFor="customer_name"
+                                    error={errors.customer_name}
+                                >
+                                    <Input
+                                        id="customer_name"
+                                        value={data.customer_name}
+                                        placeholder="Customer or client name"
+                                        onChange={(event) =>
+                                            setData(
+                                                "customer_name",
+                                                event.target.value,
+                                            )
+                                        }
+                                        disabled={processing}
+                                    />
+                                </Field>
+
+                                <Field
+                                    label="Reference no."
+                                    htmlFor="reference_no"
+                                    error={errors.reference_no}
+                                    hint="Invoice number"
+                                >
+                                    <Input
+                                        id="reference_no"
+                                        value={data.reference_no}
+                                        onChange={(event) =>
+                                            setData(
+                                                "reference_no",
+                                                event.target.value,
+                                            )
+                                        }
+                                        disabled={processing}
+                                    />
+                                </Field>
+
+                                <Field
+                                    label="Revenue account"
+                                    htmlFor="credit_account_id"
+                                    error={errors.credit_account_id}
+                                    className="sm:col-span-2"
+                                    hint="What this sale is for"
+                                >
+                                    <AccountCombobox
+                                        aria-label="Revenue account"
+                                        value={data.credit_account_id}
+                                        disabled={processing}
+                                        groups={accountOptions}
+                                        onChange={(value) =>
+                                            setData("credit_account_id", value)
+                                        }
+                                    />
+                                </Field>
+
+                                <Field
+                                    label="Taxable amount"
+                                    htmlFor="taxable_amount"
+                                    error={errors.taxable_amount}
+                                    hint="Before VAT"
+                                >
+                                    <Input
+                                        id="taxable_amount"
+                                        type="number"
+                                        step="0.01"
+                                        min="0"
+                                        className="text-right tabular-nums"
+                                        value={data.taxable_amount}
+                                        onChange={(event) =>
+                                            setData(
+                                                "taxable_amount",
+                                                event.target.value,
+                                            )
+                                        }
+                                        disabled={processing}
+                                    />
+                                </Field>
+
+                                <Field
+                                    label="Tax type"
+                                    htmlFor="tax_type"
+                                    error={errors.tax_type}
+                                >
+                                    <Select
+                                        id="tax_type"
+                                        value={data.tax_type}
+                                        onChange={(event) =>
+                                            setData(
+                                                "tax_type",
+                                                event.target
+                                                    .value as SaleFormData["tax_type"],
+                                            )
+                                        }
+                                        disabled={processing}
+                                    >
+                                        <option value="non_vat">Non-VAT</option>
+                                        <option value="vatable">VATable</option>
+                                        <option value="vat_exempt">
+                                            VAT-exempt
+                                        </option>
+                                    </Select>
+                                </Field>
+
+                                <Field
+                                    label="Withholding tax"
+                                    htmlFor="withholding_tax_rate"
+                                    error={errors.withholding_tax_rate}
+                                    hint="Withheld by the customer, if any"
+                                >
+                                    <Select
+                                        id="withholding_tax_rate"
+                                        value={data.withholding_tax_rate}
+                                        onChange={(event) =>
+                                            setData(
+                                                "withholding_tax_rate",
+                                                event.target.value,
+                                            )
+                                        }
+                                        disabled={processing}
+                                    >
+                                        {withholdingRates.map((rate) => (
+                                            <option
+                                                key={rate.value}
+                                                value={rate.value}
+                                            >
+                                                {rate.label}
+                                            </option>
+                                        ))}
+                                    </Select>
+                                </Field>
+                            </CardContent>
+                        </Card>
+
+                        <Card>
+                            <CardHeader>
+                                <CardTitle>Notes</CardTitle>
+                            </CardHeader>
+                            <CardContent>
+                                <Textarea
+                                    aria-label="Notes"
+                                    rows={2}
+                                    value={data.notes}
+                                    onChange={(event) =>
+                                        setData("notes", event.target.value)
+                                    }
+                                    disabled={processing}
+                                />
+                                {errors.notes && (
+                                    <p className="text-destructive mt-1 text-xs">
+                                        {errors.notes}
+                                    </p>
+                                )}
+                            </CardContent>
+                        </Card>
+
+                        <div className="flex flex-wrap items-center gap-3">
+                            <Button
+                                type="submit"
+                                variant="outline"
+                                disabled={processing}
+                            >
+                                <Save className="size-4" />
+                                Save as draft
+                            </Button>
+                            <Button
+                                type="button"
+                                disabled={processing}
+                                onClick={() => submit(true)}
+                            >
+                                {processing ? (
+                                    <LoaderCircle className="size-4 animate-spin" />
+                                ) : (
+                                    <Send className="size-4" />
+                                )}
+                                {method === "put"
+                                    ? "Update and post"
+                                    : "Save and post"}
+                            </Button>
+                            <Link href={backHref}>
+                                <Button type="button" variant="ghost">
+                                    Cancel
+                                </Button>
+                            </Link>
+                        </div>
+                    </form>
+                </div>
+
+                <aside className="space-y-4 xl:sticky xl:top-4 xl:self-start">
+                    <Card>
+                        <CardHeader>
+                            <CardTitle>Breakdown</CardTitle>
+                            <CardDescription>
+                                Live preview of what will post
+                            </CardDescription>
+                        </CardHeader>
+                        <CardContent className="space-y-2 text-sm">
+                            <Row
+                                label="Taxable amount"
+                                value={formatCents(preview.taxable, currency)}
+                            />
+                            {data.tax_type === "vatable" && (
+                                <Row
+                                    label="VAT"
+                                    value={formatCents(preview.vat, currency)}
+                                />
+                            )}
+                            <Row
+                                label="Gross amount"
+                                value={formatCents(preview.gross, currency)}
+                            />
+                            {preview.withholding > 0 && (
+                                <Row
+                                    label="Withholding tax"
+                                    value={`(${formatCents(preview.withholding, currency)})`}
+                                />
+                            )}
+                            <div className="flex items-center justify-between gap-2 border-t pt-2 font-medium">
+                                <span>Net receivable</span>
+                                <span className="tabular-nums">
+                                    {formatCents(
+                                        preview.netReceivable,
+                                        currency,
+                                    )}
+                                </span>
+                            </div>
+                            <p className="text-muted-foreground text-xs">
+                                This sale is recorded to Accounts Receivable and
+                                collected later with a separate payment.
+                            </p>
+                        </CardContent>
+                    </Card>
+                </aside>
+            </div>
+        </AuthenticatedLayout>
+    );
+}
+
+function Row({ label, value }: { label: string; value: string }) {
+    return (
+        <div className="flex items-center justify-between gap-2">
+            <span className="text-muted-foreground">{label}</span>
+            <span className="tabular-nums">{value}</span>
+        </div>
+    );
+}

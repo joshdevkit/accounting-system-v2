@@ -1,0 +1,32 @@
+<?php
+
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Schema;
+
+return new class extends Migration
+{
+    public function up(): void
+    {
+        Schema::table('purchases', function (Blueprint $table) {
+            $table->string('bank_name')->nullable()->after('settlement_account');
+            $table->string('check_number', 50)->nullable()->after('bank_name');
+        });
+
+        Schema::table('expenses', function (Blueprint $table) {
+            $table->string('bank_name')->nullable()->after('settlement_account');
+            $table->string('check_number', 50)->nullable()->after('bank_name');
+        });
+    }
+
+    public function down(): void
+    {
+        Schema::table('purchases', function (Blueprint $table) {
+            $table->dropColumn(['bank_name', 'check_number']);
+        });
+
+        Schema::table('expenses', function (Blueprint $table) {
+            $table->dropColumn(['bank_name', 'check_number']);
+        });
+    }
+};
