@@ -217,10 +217,9 @@ return [
             'card' => '1106',
             'cheque' => '1107',
         ],
-        // Was '4101-01' (Accounts Payable - Operations). Expenses now post to
-        // their own control account, 4106-01 Accounts Payable - General &
-        // Administrative (Maximilian), seeded by IncomeStatementAccountsSeeder.
-        'payable_account' => ['01' => '4106-01', '02' => '4106-02'],
+        // The final accountant-approved workbook uses Accounts Payable -
+        // Operations as the standard expense payable account for both units.
+        'payable_account' => ['01' => '4101-01', '02' => '4101-02'],
 
         'settlement_labels' => [
             'cash' => 'Cash',
