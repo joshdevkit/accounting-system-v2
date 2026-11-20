@@ -154,9 +154,17 @@ class FinalChartOfAccountsSeeder extends Seeder
             $rows = Account::where('company_id', $company->id)
                 ->where('account_type_id', $type->id)
                 ->get()
-                ->filter(fn (Account $account) => collect($prefixes)->contains(
-                    fn ($prefix) => str_starts_with($account->code, $prefix)
-                ));
+                ->filter(function (Account $account) use ($prefixes, $typeCode) {
+                    // 10500 and its leaves are a legacy standalone group,
+                    // not part of the final workbook's Variable Expenses.
+                    if ($typeCode === 'OPEX' && str_starts_with($account->code, '105')) {
+                        return false;
+                    }
+
+                    return collect($prefixes)->contains(
+                        fn ($prefix) => str_starts_with($account->code, $prefix)
+                    );
+                });
 
             foreach ($rows as $account) {
                 $code = $account->code;
