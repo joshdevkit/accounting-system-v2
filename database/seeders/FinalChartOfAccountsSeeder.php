@@ -133,37 +133,17 @@ class FinalChartOfAccountsSeeder extends Seeder
      */
     private function reconcileIncomeStatementRanges($company): void
     {
-        $prefixMoves = [
-            '9000' => '10000',
-            '9001' => '10001',
-            '9002' => '10002',
-            '9003' => '10003',
-            '910' => '101',
-            '920' => '102',
-            '10000' => '11000',
-            '101' => '111',
-            '102' => '112',
-            '11000' => '12000',
-            '111' => '121',
-            '12000' => '13000',
-            '121' => '131',
-            '13000' => '14000',
-            '131' => '141',
-            '14000' => '15000',
-            '141' => '151',
+        $typePrefixes = [
+            'COGS' => ['9000', '90', '91', '92'],
+            'OPEX' => ['10000', '10', '11'],
+            'NOE' => ['12000', '12'],
+            'OI' => ['13000', '13'],
+            'TAX' => ['14000', '14'],
         ];
 
-        // Use account type + known legacy code ranges to avoid touching
-        // unrelated balance-sheet accounts that share numeric prefixes.
-        $typeCodes = [
-            'COGS' => ['9000', '9001', '9002', '9003', '910', '920'],
-            'OPEX' => ['10000', '101', '102', '11000', '111'],
-            'NOE' => ['12000', '121'],
-            'OI' => ['13000', '131'],
-            'TAX' => ['14000', '141'],
-        ];
+        $moves = [];
 
-        foreach ($typeCodes as $typeCode => $prefixes) {
+        foreach ($typePrefixes as $typeCode => $prefixes) {
             $type = AccountType::where('code', $typeCode)->first();
 
             if (! $type) {
@@ -173,48 +153,71 @@ class FinalChartOfAccountsSeeder extends Seeder
             $rows = Account::where('company_id', $company->id)
                 ->where('account_type_id', $type->id)
                 ->get()
-                ->filter(function (Account $account) use ($prefixes) {
-                    return collect($prefixes)->contains(fn ($prefix) => str_starts_with($account->code, $prefix));
-                });
+                ->filter(fn (Account $account) => collect($prefixes)->contains(
+                    fn ($prefix) => str_starts_with($account->code, $prefix)
+                ));
 
             foreach ($rows as $account) {
                 $code = $account->code;
                 $newCode = $code;
 
                 if ($typeCode === 'COGS') {
-                    if ($code === '9000') $newCode = '10000';
-                    elseif (preg_match('/^(90|91|92)(\d+)(-\d{2})?$/', $code, $m)) {
+                    if ($code === '9000') {
+                        $newCode = '10000';
+                    } elseif (preg_match('/^(90|91|92)(\\d+)(-\\d{2})?$/', $code, $m)) {
                         $newCode = (string) ((int) $m[1] * 100 + (int) $m[2] + 1000) . ($m[3] ?? '');
                     }
                 } elseif ($typeCode === 'OPEX') {
-                    if ($code === '10000') $newCode = '11000';
-                    elseif ($code === '11000') $newCode = '12000';
-                    elseif (preg_match('/^(10|11)(\d{3})(-\d{2})?$/', $code, $m)) {
+                    if ($code === '10000') {
+                        $newCode = '11000';
+                    } elseif ($code === '11000') {
+                        $newCode = '12000';
+                    } elseif (preg_match('/^(10|11)(\\d{3})(-\\d{2})?$/', $code, $m)) {
                         $newCode = (string) ((int) $m[1] * 1000 + (int) $m[2] + 1000) . ($m[3] ?? '');
                     }
                 } elseif ($typeCode === 'NOE') {
-                    if ($code === '12000') $newCode = '13000';
-                    elseif (preg_match('/^12(\d{3})(-\d{2})?$/', $code, $m)) $newCode = '13' . $m[1] . ($m[2] ?? '');
+                    if ($code === '12000') {
+                        $newCode = '13000';
+                    } elseif (preg_match('/^12(\\d{3})(-\\d{2})?$/', $code, $m)) {
+                        $newCode = '13' . $m[1] . ($m[2] ?? '');
+                    }
                 } elseif ($typeCode === 'OI') {
-                    if ($code === '13000') $newCode = '14000';
-                    elseif (preg_match('/^13(\d{3})(-\d{2})?$/', $code, $m)) $newCode = '14' . $m[1] . ($m[2] ?? '');
+                    if ($code === '13000') {
+                        $newCode = '14000';
+                    } elseif (preg_match('/^13(\\d{3})(-\\d{2})?$/', $code, $m)) {
+                        $newCode = '14' . $m[1] . ($m[2] ?? '');
+                    }
                 } elseif ($typeCode === 'TAX') {
-                    if ($code === '14000') $newCode = '15000';
-                    elseif (preg_match('/^14(\d{3})(-\d{2})?$/', $code, $m)) $newCode = '15' . $m[1] . ($m[2] ?? '');
+                    if ($code === '14000') {
+                        $newCode = '15000';
+                    } elseif (preg_match('/^14(\\d{3})(-\\d{2})?$/', $code, $m)) {
+                        $newCode = '15' . $m[1] . ($m[2] ?? '');
+                    }
                 }
 
                 if ($newCode !== $code) {
-                    $account->forceFill(['code' => '__final_pnl_' . $account->id])->save();
-                    $account->forceFill(['code' => $newCode])->save();
+                    $moves[$account->id] = [$account, $newCode];
                 }
             }
+        }
+
+        // Move every source row aside first so destinations can overlap
+        // existing legacy codes without violating the company/code unique key.
+        foreach ($moves as $id => [$account]) {
+            $account->forceFill(['code' => '__final_pnl_' . $id])->save();
+        }
+
+        foreach ($moves as [$account, $newCode]) {
+            $account->forceFill(['code' => $newCode])->save();
         }
 
         // This standalone group was not present in the final workbook; the
         // final chart groups selling costs under Variable Expenses instead.
         Account::where('company_id', $company->id)
-            ->where('code', '10500')
-            ->orWhere('code', 'like', '105%')
+            ->where(function ($query) {
+                $query->where('code', '10500')
+                    ->orWhere('code', 'like', '105%');
+            })
             ->update([
                 'is_active' => false,
                 'description' => 'LEGACY ACCOUNT. Not listed as a separate group in the final accountant-approved workbook.',
@@ -243,7 +246,13 @@ class FinalChartOfAccountsSeeder extends Seeder
         }
 
         $suppliers = Account::where('company_id', $company->id)->where('code', '4107-01')->first();
-        if (! $suppliers) {
+        if ($suppliers) {
+            $suppliers->forceFill([
+                'name' => 'Accounts Payable - Other Suppliers',
+                'is_active' => true,
+                'description' => null,
+            ])->save();
+        } else {
             $this->upsert($company, $currentLiabilities, '4107-01', 'Accounts Payable - Other Suppliers', 'CL');
         }
 
