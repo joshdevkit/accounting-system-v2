@@ -59,7 +59,7 @@ class StorePosEntryRequest extends FormRequest
                     : 'nullable',
                 'numeric', 'min:0', 'max:100',
             ],
-            'calculation_version' => ['nullable', Rule::in(['sales_format_2', 'sales_format_3', 'sales_format_4'])],
+            'calculation_version' => ['nullable', Rule::in(['sales_format_2', 'sales_format_3', 'sales_format_4', 'sales_format_5'])],
             'avl_increment_amount' => ['nullable', 'numeric', 'min:0', 'max:99999999999.99'],
             'other_suppliers_increment_amount' => ['nullable', 'numeric', 'min:0', 'max:99999999999.99'],
             'massage_increment_amount' => ['nullable', 'numeric', 'min:0', 'max:99999999999.99'],
@@ -119,7 +119,7 @@ class StorePosEntryRequest extends FormRequest
     {
         $income = array_intersect_key($this->validated(), config('accounting.pos.income_fields'));
         $gross = Money::sum($income);
-        if ($gross !== 0 || in_array($this->input('calculation_version'), ['sales_format_2', 'sales_format_3', 'sales_format_4'], true) || Money::cents($this->input('complimentary_room_amount')) !== 0) {
+        if ($gross !== 0 || in_array($this->input('calculation_version'), ['sales_format_2', 'sales_format_3', 'sales_format_4', 'sales_format_5'], true) || Money::cents($this->input('complimentary_room_amount')) !== 0) {
             if ($this->boolean('post_now')) {
                 throw ValidationException::withMessages([
                     'post_now' => 'Save the entry to review its calculated workbook journal before ledger posting.',

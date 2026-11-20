@@ -63,6 +63,7 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
     'bank_transfer_amount',
     'cheque_amount',
     'accounts_receivable_amount',
+    'ar_employee_amount',
     'room_post_amount',
     'gift_voucher_amount',
     'other_payment_amount',
@@ -109,6 +110,7 @@ class PosEntry extends Model
             'avl_amount' => 'decimal:2',
             'other_income_amount' => 'decimal:2',
             'online_booking_amount' => 'decimal:2',
+            'ar_employee_amount' => 'decimal:2',
             'withholding_tax_amount' => 'decimal:2',
             'gross_sales' => 'decimal:2',
             'discount_amount' => 'decimal:2',
@@ -169,7 +171,7 @@ class PosEntry extends Model
 
     public function hasIncomeDetails(): bool
     {
-        return in_array($this->calculation_version, ['sales_format_2', 'sales_format_3', 'sales_format_4'], true)
+        return in_array($this->calculation_version, ['sales_format_2', 'sales_format_3', 'sales_format_4', 'sales_format_5'], true)
             || Money::cents($this->complimentary_room_amount) !== 0
             || Money::sum(array_map(
             fn (string $field) => $this->{$field},
@@ -212,7 +214,7 @@ class PosEntry extends Model
      */
     public function expectedTenderCents(): int
     {
-        if (in_array($this->calculation_version, ['sales_format_2', 'sales_format_3', 'sales_format_4'], true)) {
+        if (in_array($this->calculation_version, ['sales_format_2', 'sales_format_3', 'sales_format_4', 'sales_format_5'], true)) {
             return Money::cents($this->amount_due);
         }
         if ($this->hasIncomeDetails()) {

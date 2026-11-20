@@ -390,7 +390,7 @@ class PosPostingService
 
     public function workbookPreview(PosEntry $pos): array
     {
-        if (in_array($pos->calculation_version, ['sales_format_3', 'sales_format_4'], true)) {
+        if (in_array($pos->calculation_version, ['sales_format_3', 'sales_format_4', 'sales_format_5'], true)) {
             return $pos->journalEntry?->workbook_snapshot ?? app(PosWorkbookService::class)->preview($pos);
         }
         $calculated = app(PosSalesCalculationService::class)->calculate($pos->getAttributes());

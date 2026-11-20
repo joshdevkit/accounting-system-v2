@@ -114,11 +114,11 @@ export function PosWorkbookCalculation({
                                     currency,
                                 )}
                                 .
-                                {["sales_format_3", "sales_format_4"].includes(preview.sales.calculation_version ?? "")
+                                {["sales_format_3", "sales_format_4", "sales_format_5"].includes(preview.sales.calculation_version ?? "")
                                     ? ` Plus complementary rooms (N) ${formatCents(preview.sales.gross_sales - preview.sales.income_total, currency)}; payments excluded.`
                                     : ` Plus payments ${formatCents(preview.sales.payments_total, currency)}; complementary rooms excluded.`}
                             </p>
-                            {["sales_format_3", "sales_format_4"].includes(preview.sales.calculation_version ?? "") && (
+                            {["sales_format_3", "sales_format_4", "sales_format_5"].includes(preview.sales.calculation_version ?? "") && (
                                 <p>
                                     Workbook totals retain unrounded formula
                                     precision (including the variance). Saved
@@ -175,7 +175,7 @@ export function PosWorkbookCalculation({
             <Card>
                 <CardHeader>
                     <CardTitle>
-                        {["sales_format_3", "sales_format_4"].includes(preview.sales.calculation_version ?? "")
+                        {["sales_format_3", "sales_format_4", "sales_format_5"].includes(preview.sales.calculation_version ?? "")
                             ? "Saved draft journal — workbook calculation"
                             : "Journal entry preview"}
                     </CardTitle>
